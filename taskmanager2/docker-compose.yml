@@ -1,0 +1,297 @@
+version: "3.9"
+
+# ═══════════════════════════════════════════════════════════════════
+#  TaskManager — Docker Compose
+#  Orden de arranque: mysql → config-server → eureka → servicios → gateway
+#
+#  Uso rápido:
+#    docker compose up --build          # primera vez
+#    docker compose up -d               # arrancar en segundo plano
+#    docker compose down -v             # parar y borrar volúmenes
+#
+#  Panel Eureka: http://localhost:8761
+#  API Gateway:  http://localhost:8080
+#  Swagger de cualquier servicio (ejemplo):
+#    http://localhost:8082/swagger-ui.html  (usuario)
+#    http://localhost:8083/swagger-ui.html  (tarea)
+# ═══════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── Base de datos compartida ────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: taskmanager-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_HOST: "%"
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init-dbs.sql:/docker-entrypoint-initdb.d/init-dbs.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - tasknet
+
+  # ── 1) Config Server ────────────────────────────────────────────
+  config-server:
+    build: ./config-server
+    container_name: taskmanager-config
+    environment:
+      SERVER_PORT: 8888
+    ports:
+      - "8888:8888"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - tasknet
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8888/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+
+  # ── 2) Eureka Server ────────────────────────────────────────────
+  eureka-server:
+    build: ./eureka-server
+    container_name: taskmanager-eureka
+    environment:
+      SERVER_PORT: 8761
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+    ports:
+      - "8761:8761"
+    depends_on:
+      config-server:
+        condition: service_healthy
+    networks:
+      - tasknet
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8761/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+
+  # ── 3) Microservicios de dominio ────────────────────────────────
+
+  usuario:
+    build: ./usuario
+    container_name: taskmanager-usuario
+    environment:
+      SERVER_PORT: 8082
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/usuario_db?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: usuario
+    ports:
+      - "8082:8082"
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+    networks:
+      - tasknet
+
+  tarea:
+    build: ./tarea
+    container_name: taskmanager-tarea
+    environment:
+      SERVER_PORT: 8083
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/tareas_db?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: tarea
+    ports:
+      - "8083:8083"
+    depends_on:
+      usuario:
+        condition: service_started
+    networks:
+      - tasknet
+
+  notificacion:
+    build: ./notificacion
+    container_name: taskmanager-notificacion
+    environment:
+      SERVER_PORT: 8084
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/notificaciones_db?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: notificacion
+    ports:
+      - "8084:8084"
+    depends_on:
+      usuario:
+        condition: service_started
+    networks:
+      - tasknet
+
+  auditoria:
+    build: ./auditoria
+    container_name: taskmanager-auditoria
+    environment:
+      SERVER_PORT: 8085
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/auditoria_db?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: auditoria
+    ports:
+      - "8085:8085"
+    depends_on:
+      usuario:
+        condition: service_started
+    networks:
+      - tasknet
+
+  recompensa:
+    build: ./recompensa
+    container_name: taskmanager-recompensa
+    environment:
+      SERVER_PORT: 8086
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/gamificacion_db?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: recompensa
+    ports:
+      - "8086:8086"
+    depends_on:
+      usuario:
+        condition: service_started
+    networks:
+      - tasknet
+
+  seguridad:
+    build: ./seguridad
+    container_name: taskmanager-seguridad
+    environment:
+      SERVER_PORT: 8087
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/seguridad_db?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: seguridad
+    ports:
+      - "8087:8087"
+    depends_on:
+      usuario:
+        condition: service_started
+    networks:
+      - tasknet
+
+  comentario:
+    build: ./comentario
+    container_name: taskmanager-comentario
+    environment:
+      SERVER_PORT: 8088
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/comentarios_db?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: comentario
+    ports:
+      - "8088:8088"
+    depends_on:
+      tarea:
+        condition: service_started
+    networks:
+      - tasknet
+
+  adjunto:
+    build: ./adjunto
+    container_name: taskmanager-adjunto
+    environment:
+      SERVER_PORT: 8089
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/adjuntos_db?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: adjunto
+    ports:
+      - "8089:8089"
+    depends_on:
+      tarea:
+        condition: service_started
+    networks:
+      - tasknet
+
+  equipo:
+    build: ./equipo
+    container_name: taskmanager-equipo
+    environment:
+      SERVER_PORT: 8090
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/equipos_db?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: equipo
+    ports:
+      - "8090:8090"
+    depends_on:
+      usuario:
+        condition: service_started
+    networks:
+      - tasknet
+
+  reporte:
+    build: ./reporte
+    container_name: taskmanager-reporte
+    environment:
+      SERVER_PORT: 8091
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/reportes_db?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: reporte
+    ports:
+      - "8091:8091"
+    depends_on:
+      usuario:
+        condition: service_started
+    networks:
+      - tasknet
+
+  # ── 4) API Gateway ──────────────────────────────────────────────
+  api-gateway:
+    build: ./api-gateway
+    container_name: taskmanager-gateway
+    environment:
+      SERVER_PORT: 8080
+      SPRING_CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: api-gateway
+    ports:
+      - "8080:8080"
+    depends_on:
+      usuario:
+        condition: service_started
+      tarea:
+        condition: service_started
+    networks:
+      - tasknet
+
+# ── Volúmenes y redes ───────────────────────────────────────────────
+volumes:
+  mysql_data:
+
+networks:
+  tasknet:
+    driver: bridge
